@@ -198,8 +198,13 @@ clnt_vc_ncreatef(const int fd,	/* open file descriptor */
 		}
 	}
 
+	uint32_t updated_flags = flags;
+	if (flags & CLNT_CREATE_FLAG_SVCXPRT)
+		/* Set flag to not create new svcxprt */
+		updated_flags |= SVC_XPRT_FLAG_LOOKUP_ONLY;
+
 	/* find or create shared fd state; ref+1 */
-	xprt = svc_fd_ncreatef(fd, sendsz, recvsz, flags);
+	xprt = svc_fd_ncreatef(fd, sendsz, recvsz, updated_flags);
 	if (!xprt) {
 		__warnx(TIRPC_DEBUG_FLAG_ERROR,
 			"%s: fd %d svc_fd_ncreatef failed",
@@ -250,6 +255,22 @@ clnt_vc_ncreatef(const int fd,	/* open file descriptor */
  err:
 	thr_sigsetmask(SIG_SETMASK, &(mask), NULL);
 	return (clnt);
+}
+
+/*
+ * Get the transport handle for a given rpc_client.
+ */
+SVCXPRT *
+clnt_vc_get_client_xprt(const struct rpc_client *clnt)
+{
+	if (clnt == NULL)
+		return NULL;
+
+	struct cx_data *cx = CX_DATA(clnt);
+
+	if (cx->cx_rec)
+		return &(cx->cx_rec->xprt);
+	return NULL;
 }
 
 /*

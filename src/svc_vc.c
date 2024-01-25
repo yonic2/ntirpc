@@ -278,13 +278,24 @@ makefd_xprt(const int fd, const u_int sendsz, const u_int recvsz,
 	assert(fd != -1);
 
 	/* atomically find or create shared fd state; ref+1; locked */
-	xprt = svc_xprt_lookup(fd, svc_vc_xprt_setup);
+	if (flags & SVC_XPRT_FLAG_LOOKUP_ONLY) {
+		xprt = svc_xprt_lookup(fd, NULL);
+		/* Do not associate SVC_XPRT_FLAG_LOOKUP_ONLY with xprt, as
+		 * this flag does not represent the xprt state. It is only a
+		 * flag required for the xprt creation.
+		 */
+		flags = flags & (~SVC_XPRT_FLAG_LOOKUP_ONLY);
+	} else {
+		xprt = svc_xprt_lookup(fd, svc_vc_xprt_setup);
+	}
+
 	if (!xprt) {
 		__warnx(TIRPC_DEBUG_FLAG_SVC_VC,
 			"%s: fd %d svc_xprt_lookup failed",
 			__func__, fd);
 		return (NULL);
 	}
+
 	rec = REC_XPRT(xprt);
 
 	xp_flags = atomic_postset_uint16_t_bits(&xprt->xp_flags, flags
@@ -357,7 +368,9 @@ svc_fd_ncreatef(const int fd, const u_int sendsize, const u_int recvsize,
 	assert(fd != -1);
 
 	xprt = makefd_xprt(fd, sendsize, recvsize, &si,
-			   flags & SVC_XPRT_FLAG_CLOSE);
+			   (flags & SVC_XPRT_FLAG_CLOSE) |
+			   (flags & SVC_XPRT_FLAG_LOOKUP_ONLY));
+
 	if ((!xprt) || (!(xprt->xp_flags & SVC_XPRT_FLAG_INITIAL)))
 		return (xprt);
 
@@ -539,6 +552,7 @@ svc_vc_destroy_task(struct work_pool_entry *wpe)
 	struct rpc_dplx_rec *rec =
 			opr_containerof(wpe, struct rpc_dplx_rec, ioq.ioq_wpe);
 	uint16_t xp_flags;
+	bool reset_xprt_fd = false;
 
 	__warnx(TIRPC_DEBUG_FLAG_REFCNT,
 		"%s() %p fd %d xp_refcnt %" PRId32,
@@ -552,17 +566,22 @@ svc_vc_destroy_task(struct work_pool_entry *wpe)
 
 	xp_flags = atomic_postclear_uint16_t_bits(&rec->xprt.xp_flags,
 						  SVC_XPRT_FLAG_CLOSE);
-	if ((xp_flags & SVC_XPRT_FLAG_CLOSE)
-	    && rec->xprt.xp_fd != RPC_ANYFD) {
+	if ((xp_flags & SVC_XPRT_FLAG_CLOSE) && rec->xprt.xp_fd != RPC_ANYFD) {
 		(void)close(rec->xprt.xp_fd);
 		__warnx(TIRPC_DEBUG_FLAG_SVC_VC,
 			"%s: fd %d closed",
 			 __func__, rec->xprt.xp_fd);
-		rec->xprt.xp_fd = RPC_ANYFD;
+		/* Mark xprt_fd for reset */
+		reset_xprt_fd = true;
 	}
 
 	if (rec->xprt.xp_ops->xp_free_user_data)
 		rec->xprt.xp_ops->xp_free_user_data(&rec->xprt);
+
+	/* Reset xprt's FD after the xp_free_user_data call */
+	if (reset_xprt_fd) {
+		rec->xprt.xp_fd = RPC_ANYFD;
+	}
 
 	if (rec->xprt.xp_tp)
 		mem_free(rec->xprt.xp_tp, 0);
@@ -616,6 +635,16 @@ svc_vc_control(SVCXPRT *xprt, const u_int rq, void *in)
 	case SVCSET_XP_FLAGS:
 		xprt->xp_flags = *(u_int *) in;
 		break;
+	case SVCGET_XP_UNREF_USER_DATA:
+		mutex_lock(&ops_lock);
+		*(svc_xprt_void_fun_t *) in = xprt->xp_ops->xp_unref_user_data;
+		mutex_unlock(&ops_lock);
+		break;
+	case SVCSET_XP_UNREF_USER_DATA:
+		mutex_lock(&ops_lock);
+		xprt->xp_ops->xp_unref_user_data = *(svc_xprt_void_fun_t) in;
+		mutex_unlock(&ops_lock);
+		break;
 	case SVCGET_XP_FREE_USER_DATA:
 		mutex_lock(&ops_lock);
 		*(svc_xprt_fun_t *) in = xprt->xp_ops->xp_free_user_data;
@@ -643,6 +672,16 @@ svc_vc_rendezvous_control(SVCXPRT *xprt, const u_int rq, void *in)
 		break;
 	case SVCSET_CONNMAXREC:
 		xd->sx_dr.maxrec = *(int *)in;
+		break;
+	case SVCGET_XP_UNREF_USER_DATA:
+		mutex_lock(&ops_lock);
+		*(svc_xprt_void_fun_t *) in = xprt->xp_ops->xp_unref_user_data;
+		mutex_unlock(&ops_lock);
+		break;
+	case SVCSET_XP_UNREF_USER_DATA:
+		mutex_lock(&ops_lock);
+		xprt->xp_ops->xp_unref_user_data = *(svc_xprt_void_fun_t) in;
+		mutex_unlock(&ops_lock);
 		break;
 	case SVCGET_XP_FREE_USER_DATA:
 		mutex_lock(&ops_lock);
@@ -1125,6 +1164,7 @@ svc_vc_override_ops(SVCXPRT *xprt, SVCXPRT *rendezvous)
 		ops.xp_reply = svc_vc_reply;
 		ops.xp_checksum = svc_vc_checksum;
 		ops.xp_unlink = svc_vc_unlink_it;
+		ops.xp_unref_user_data = NULL;	/* no default */
 		ops.xp_destroy = svc_vc_destroy_it;
 		ops.xp_control = svc_vc_control;
 		ops.xp_free_user_data = NULL;	/* no default */
@@ -1151,6 +1191,7 @@ svc_vc_rendezvous_ops(SVCXPRT *xprt)
 		ops.xp_reply = (svc_req_fun_t)abort;
 		ops.xp_checksum = NULL;		/* not used */
 		ops.xp_unlink = svc_vc_unlink_it;
+		ops.xp_unref_user_data = NULL;	/* no default */
 		ops.xp_destroy = svc_vc_destroy_it;
 		ops.xp_control = svc_vc_rendezvous_control;
 		ops.xp_free_user_data = NULL;	/* no default */
