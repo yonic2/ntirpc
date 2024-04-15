@@ -129,10 +129,12 @@ unref_svc_rpc_gss_data(struct svc_rpc_gss_data *gd)
 struct svc_rpc_gss_data *authgss_ctx_hash_get(struct rpc_gss_cred *gc);
 bool authgss_ctx_hash_set(struct svc_rpc_gss_data *gd);
 bool authgss_ctx_hash_del(struct svc_rpc_gss_data *gd);
+void authgss_ctx_hash_clear(void);
 
 bool svcauth_gss_acquire_cred(void);
 bool svcauth_gss_release_cred(void);
 bool svcauth_gss_import_name(char *service);
 bool svcauth_gss_set_svc_name(gss_name_t name);
+void svcauth_gss_set_status(bool status_enabled);
 
 #endif				/* GSS_INTERNAL_H */
