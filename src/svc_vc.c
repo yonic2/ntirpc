@@ -533,10 +533,10 @@ svc_vc_rendezvous(SVCXPRT *xprt)
 	newxprt->xp_parent = xprt;
 	if (xprt->xp_dispatch.rendezvous_cb(newxprt)
 	 || svc_rqst_xprt_register(newxprt, xprt)) {
+		// Note xp_parent is released in svc_vc_destroy_task
 		SVC_DESTROY(newxprt);
 		/* Was never added to epoll */
 		SVC_RELEASE(newxprt, SVC_RELEASE_FLAG_NONE);
-		SVC_RELEASE(xprt, SVC_RELEASE_FLAG_NONE);
 		return (XPRT_DESTROYED);
 	}
 
@@ -554,14 +554,20 @@ svc_vc_destroy_task(struct work_pool_entry *wpe)
 	uint16_t xp_flags;
 	bool reset_xprt_fd = false;
 
+	const int32_t xp_refcnt = atomic_fetch_int32_t(&rec->xprt.xp_refcnt);
 	__warnx(TIRPC_DEBUG_FLAG_REFCNT,
 		"%s() %p fd %d xp_refcnt %" PRId32,
-		__func__, rec, rec->xprt.xp_fd, rec->xprt.xp_refcnt);
+		__func__, rec, rec->xprt.xp_fd, xp_refcnt);
 
-	if (rec->xprt.xp_refcnt) {
+	if (xp_refcnt > 0) {
 		/* instead of nanosleep */
 		work_pool_submit(&svc_work_pool, &(rec->ioq.ioq_wpe));
 		return;
+	} else if (unlikely(xp_refcnt < 0)) {
+		__warnx(TIRPC_DEBUG_FLAG_ERROR,
+			"%s() negative refcnt: %p fd %d xp_refcnt %" PRId32,
+			__func__, rec, rec->xprt.xp_fd, xp_refcnt);
+		abort();
 	}
 
 	xp_flags = atomic_postclear_uint16_t_bits(&rec->xprt.xp_flags,
